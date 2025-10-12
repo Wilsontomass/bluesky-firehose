@@ -241,6 +241,31 @@ def process_language_counts_kafka(df):
     return language_counts
 
 
+def process_posts_for_embeddings(df):
+    posts_df = df.filter(
+        (col("kind") == "commit") &
+        (col("commit.operation") == "create") &
+        (col("commit.collection") == "app.bsky.feed.post")
+    )
+    
+    raw_posts_df = posts_df.select(
+        col("partition_key").alias("user_id"),
+        col("commit.record.text").alias("text"),
+        explode(coalesce(col("commit.record.langs"), array())).alias("language"),
+        (col("time_us") / 1000000).cast("timestamp").alias("post_timestamp")
+    ).filter(col("text").isNotNull() & (col("text") != ""))
+
+    # Add window columns for partitioning
+    raw_posts_df = raw_posts_df.withColumn(
+        "window_start", window(col("post_timestamp"), "2 minutes").start
+    ).withColumn(
+        "window_end", window(col("post_timestamp"), "2 minutes").end
+    )
+
+    return raw_posts_df
+
+
+
 def process_platform_health_metrics(df):
     """
     Monitor overall platform health and processing performance.
@@ -330,6 +355,7 @@ def main():
         # Process different analytics
         language_counts = process_language_counts_kafka(stream_df)
         health_metrics = process_platform_health_metrics(stream_df)
+        raw_posts_df = process_posts_for_embeddings(stream_df)
         
         # Console outputs for monitoring
         language_console_query = language_counts.writeStream \
@@ -339,6 +365,15 @@ def main():
             .option("numRows", 20) \
             .trigger(processingTime="1 minute") \
             .queryName("language_console") \
+            .start()
+        
+        raw_posts_console_query = raw_posts_df.writeStream \
+            .outputMode("append") \
+            .format("console") \
+            .option("truncate", False) \
+            .option("numRows", 5) \
+            .trigger(processingTime="1 minute") \
+            .queryName("raw_posts_console") \
             .start()
         
         health_console_query = health_metrics.writeStream \
@@ -360,6 +395,18 @@ def main():
             .queryName("language_parquet") \
             .start()
         
+        raw_posts_parquet_query = raw_posts_df.writeStream \
+            .outputMode("append") \
+            .format("parquet") \
+            .option("path", "output/raw_posts_kafka") \
+            .option("checkpointLocation", "checkpoint/raw_posts_kafka") \
+            .partitionBy("window_start") \
+            .trigger(processingTime="1 minute") \
+            .queryName("raw_posts_parquet") \
+            .start()
+
+
+        
         health_parquet_query = health_metrics.writeStream \
             .outputMode("append") \
             .format("parquet") \
@@ -375,6 +422,13 @@ def main():
             .outputMode("complete") \
             .format("memory") \
             .queryName("language_counts_kafka_table") \
+            .trigger(processingTime="1 minute") \
+            .start()
+        
+        posts_memory_query = raw_posts_df.writeStream \
+            .outputMode("append") \
+            .format("memory") \
+            .queryName("raw_posts_kafka_table") \
             .trigger(processingTime="1 minute") \
             .start()
         
