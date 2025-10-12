@@ -1,3 +1,4 @@
 /venv
 /output
 /checkpoint
+/docker-compose.yml
