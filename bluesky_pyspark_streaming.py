@@ -249,14 +249,17 @@ def process_posts_for_embeddings(df):
     )
     
     raw_posts_df = posts_df.select(
+        col("did"),
+        col("commit.rkey").alias("rkey"),
         col("partition_key").alias("user_id"),
         col("commit.record.text").alias("text"),
-        explode(coalesce(col("commit.record.langs"), array())).alias("language"),
-        (col("time_us") / 1000000).cast("timestamp").alias("post_timestamp")
-    ).filter(col("text").isNotNull() & (col("text") != ""))
+        col("commit.record.langs").alias("langs"),
+        (col("time_us") / 1_000_000).cast("timestamp").alias("post_timestamp"),
+        col("commit.record.createdAt").alias("createdAt")
+    ).filter(col("text").isNotNull() & (length(col("text")) > 0))
 
     raw_posts_df = raw_posts_df.withWatermark("post_timestamp", "3 minutes") \
-                           .dropDuplicates(["user_id", "post_timestamp"])
+                           .dropDuplicates(["did", "rkey"]) # did is the users decentralized ID, rkey is the post ID. This is better than using user_id and timestamp since it is guaranteed unique.
 
 
     raw_posts_df = raw_posts_df.withColumn(
