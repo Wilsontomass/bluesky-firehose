@@ -255,7 +255,10 @@ def process_posts_for_embeddings(df):
         (col("time_us") / 1000000).cast("timestamp").alias("post_timestamp")
     ).filter(col("text").isNotNull() & (col("text") != ""))
 
-    # Add window columns for partitioning
+    raw_posts_df = raw_posts_df.withWatermark("post_timestamp", "3 minutes") \
+                           .dropDuplicates(["user_id", "post_timestamp"])
+
+
     raw_posts_df = raw_posts_df.withColumn(
         "window_start", window(col("post_timestamp"), "2 minutes").start
     ).withColumn(
@@ -371,7 +374,7 @@ def main():
             .outputMode("append") \
             .format("console") \
             .option("truncate", False) \
-            .option("numRows", 5) \
+            .option("numRows", 10) \
             .trigger(processingTime="1 minute") \
             .queryName("raw_posts_console") \
             .start()
