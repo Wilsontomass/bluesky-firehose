@@ -106,4 +106,3 @@ for c in sorted(clusters.keys()):
         raw = texts[ridx][:160]
         snippet = re.sub(r"\s+", " ", raw).strip()
         print(f"  • [{dist:.3f}] {snippet}")
-
