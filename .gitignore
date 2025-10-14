@@ -2,3 +2,5 @@
 /output
 /checkpoint
 /docker-compose.yml
+embedingmodeltest.py
+environment.yml
