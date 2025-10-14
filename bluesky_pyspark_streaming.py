@@ -251,7 +251,7 @@ def process_posts_for_embeddings(df):
     raw_posts_df = posts_df.select(
         col("partition_key").alias("user_id"),
         col("commit.record.text").alias("text"),
-        explode(coalesce(col("commit.record.langs"), array())).alias("language"),
+        coalesce(col("commit.record.langs"), array()).alias("languages"),
         (col("time_us") / 1000000).cast("timestamp").alias("post_timestamp")
     ).filter(col("text").isNotNull() & (col("text") != ""))
 
