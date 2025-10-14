@@ -1,108 +1,129 @@
 import pyarrow.dataset as ds
 import numpy as np
-from sklearn.cluster import MiniBatchKMeans
-from sklearn.preprocessing import normalize
-import re
-
+import hdbscan
+import umap
+from sklearn.feature_extraction.text import TfidfVectorizer
+from collections import defaultdict
+import pandas as pd
+import pickle
+from sklearn.metrics.pairwise import cosine_similarity
+from transformers import pipeline
 
 BASE_DIR = "output/raw_posts_embeddings_gemma"
 
-# Load the dataset
+# ---------------- Load embeddings ----------------
+print("Loading Embeddings...")
 dataset = ds.dataset(BASE_DIR, format="parquet")
-table = dataset.to_table(columns=["post_id", "text", "embedding"])
+table = dataset.to_table(columns=["post_id", "text", "text_clean", "embedding"])
 
-# Pull columns
 post_id = table.column("post_id").to_pylist()
-texts   = table.column("text").to_pylist()
-
-# Efficiently turn list<float32> → (N, D) float32 NumPy
+texts = table.column("text").to_pylist()
+texts_clean = table.column("text_clean").to_pylist()
 embeddings = np.vstack(table.column("embedding").to_pylist()).astype(np.float32)
 
-# --- Sanity check & clean ---
-finite_mask = np.isfinite(embeddings).all(axis=1)
-if not finite_mask.all():
-    n_bad = (~finite_mask).sum()
-    print(f"Found {n_bad} rows with NaN/Inf in embeddings; dropping them.")
-    # keep only good rows across all aligned arrays
-    embeddings = embeddings[finite_mask]
-    post_id = [pid for i, pid in enumerate(post_id) if finite_mask[i]]
-    texts   = [tx  for i, tx  in enumerate(texts)   if finite_mask[i]]
-
-# Optional: if you'd rather replace instead of drop:
-# embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
-
-print("After cleaning:", embeddings.shape, embeddings.dtype)
-
-# --- Safe L2 normalize (cosine-ready) ---
+# Normalize embeddings
+print("Normalizing Embeddings...")
 norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
 nonzero = norms.squeeze() > 0
-# avoid division-by-zero
-embeddings[nonzero] = embeddings[nonzero] / norms[nonzero]
-# rows with zero norm stay zero; they will cluster as noise/outliers
+embeddings[nonzero] /= norms[nonzero]
 
-X = embeddings  # already L2-normalized for nonzero rows
-k = 20  # choose/tune
-kmeans = MiniBatchKMeans(n_clusters=k, batch_size=4096, n_init="auto", random_state=42)
-labels = kmeans.fit_predict(X)
+# ---------------- Dimensionality reduction ----------------
+print("Dimensionality reduction...")
+print("Embedding Dimension ---> 64D...")
+reducer_high = umap.UMAP(n_components=64, metric="cosine")
+X_64d = reducer_high.fit_transform(embeddings)
 
-# ---------------- Label clusters from texts ----------------
-from collections import defaultdict
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_distances
-
-# 1) Build a TF-IDF model on ALL texts
-# If your texts are mostly English, set stop_words="english".
-# If they're mixed/Swedish, leave None (or provide your own list).
-vectorizer = TfidfVectorizer(
-    lowercase=True,
-    strip_accents="unicode",
-    ngram_range=(1, 2),        # unigrams + bigrams label better
-    max_features=50000,        # tune as needed
-    min_df=2                   # ignore ultra-rare terms
+# ---------------- HDBSCAN clustering ----------------
+print("HDBSCAN clustering...")
+clusterer = hdbscan.HDBSCAN(
+    min_cluster_size=30,
+    min_samples=5,
+    metric="euclidean",
+    cluster_selection_method="eom"
 )
-tfidf = vectorizer.fit_transform(texts)  # shape: (N_docs, Vocab)
+labels = clusterer.fit_predict(X_64d)
 
-# 2) Group doc indices by cluster
+# ---------------- Group clusters ----------------
 clusters = defaultdict(list)
 for i, c in enumerate(labels):
+    if c == -1:
+        continue
     clusters[c].append(i)
 
-terms = vectorizer.get_feature_names_out()
+# ---------------- Compute cluster centroids in 64D ----------------
+cluster_ids = []
+cluster_centroids_64d = []
 
-def top_terms_for_cluster(doc_indices, top_k=6):
-    # average TF-IDF vector for docs in the cluster, then take top terms
-    sub = tfidf[doc_indices]                # (n_i, V)
-    mean_vec = sub.mean(axis=0)             # (1, V) sparse
-    mean_vec = mean_vec.A1                  # to 1D np array
-    top_idx = mean_vec.argsort()[::-1][:top_k]
-    return [terms[j] for j in top_idx if mean_vec[j] > 0]
+for c, idxs in clusters.items():
+    cluster_ids.append(c)
+    cluster_centroids_64d.append(X_64d[idxs].mean(axis=0))
 
-def representative_docs(doc_indices, center_embedding, k=3):
-    # closest texts to the centroid in *embedding* space (better semantic reps)
-    E = X[doc_indices]                      # normalized embeddings
-    d = cosine_distances(E, center_embedding[None, :]).ravel()
-    order = np.argsort(d)[:k]
-    return [(doc_indices[idx], float(d[order[i]])) for i, idx in enumerate(order)]
+cluster_centroids_64d = np.vstack(cluster_centroids_64d)
 
-# 3) Print labels + sample representative posts for each cluster
-for c in sorted(clusters.keys()):
+# ---------------- Reduce centroids to 2D for visualization ----------------
+print("Reducing cluster centroids to 2D...")
+reducer_2d = umap.UMAP(
+    n_components=2,
+    metric="cosine",
+    min_dist=0.1,
+    spread=1.0,
+)
+X_2d_centroids = reducer_2d.fit_transform(cluster_centroids_64d)
+
+# Map back to clusters for plotting
+cluster_positions = {c: X_2d_centroids[i] for i, c in enumerate(cluster_ids)}
+
+# ---------------- Summarizer pipeline ----------------
+print("Summarizing...")
+summarizer = pipeline("summarization", model="t5-small")  # lightweight, can switch to flan-t5-base
+
+# ---------------- Prepare cluster summary ----------------
+cluster_summary = []
+
+for i, c in enumerate(cluster_ids):
     doc_idx = clusters[c]
     if len(doc_idx) == 0:
         continue
 
-    # label from TF-IDF
-    label_terms = top_terms_for_cluster(doc_idx, top_k=6)
-    label_str = ", ".join(label_terms) if label_terms else "(no strong terms)"
+    # Use precomputed 2D centroid positions
+    centroid_2d = X_2d_centroids[i]
 
-    # centroid in embedding space (already L2-normalized)
-    centroid = X[doc_idx].mean(axis=0)
-    centroid /= (np.linalg.norm(centroid) + 1e-12)
+    # High-dimensional centroid for selecting representative posts
+    E_hd = X_64d[doc_idx]
+    centroid_hd = E_hd.mean(axis=0)
+    sim = cosine_similarity(E_hd, centroid_hd.reshape(1, -1)).ravel()
+    top_idx = np.argsort(-sim)[:3]
+    context_text = " ".join(texts_clean[doc_idx[j]] for j in top_idx)
 
-    reps = representative_docs(doc_idx, centroid, k=3)
+    # Summarize context into a short label
+    prompt = context_text
+    try:
+        input_len = len(prompt.split())
+        summary_text = summarizer(
+            prompt,
+            min_length=3,
+            max_new_tokens=10,
+            do_sample=False,
+            clean_up_tokenization_spaces=True
+        )[0]["summary_text"]
+    except Exception:
+        # fallback to short snippets
+        summary_text = ", ".join([texts_clean[doc_idx[j]][:15] for j in top_idx])
 
-    print(f"\n=== Cluster {c} | {len(doc_idx)} posts ===")
-    print(f"Label: {label_str}")
-    for ridx, dist in reps:
-        raw = texts[ridx][:160]
-        snippet = re.sub(r"\s+", " ", raw).strip()
-        print(f"  • [{dist:.3f}] {snippet}")
+    cluster_summary.append({
+        "cluster": int(c),
+        "size": len(doc_idx),
+        "x": float(centroid_2d[0]),
+        "y": float(centroid_2d[1]),
+        "summary": summary_text
+    })
+
+# ---------------- Save cluster summary ----------------
+with open("clusters.pkl", "wb") as f:
+    pickle.dump(cluster_summary, f)
+
+print(f"Saved {len(cluster_summary)} clusters with summaries to clusters.pkl")
+
+
+
+
