@@ -1,3 +1,7 @@
 /venv
 /output
 /checkpoint
+/docker-compose.yml
+clusters.pkl
+embedingmodeltest.py
+environment.yml
