@@ -1,0 +1,95 @@
+services:
+  kafka:
+    image: apache/kafka:latest
+    container_name: kafka-broker
+    user: root  # Run as root to avoid permission issues
+    ports:
+      - "9092:9092"  # External access
+      - "9093:9093"  # Internal access
+    environment:
+      # Cluster ID (generate with: kafka-storage.sh random-uuid)
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      
+      # Node ID
+      KAFKA_NODE_ID: 1
+      
+      # Process roles
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      
+      # Listeners - EXTERNAL for internet, INTERNAL for container network
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9093,CONTROLLER://localhost:9094,SASL_PLAINTEXT://0.0.0.0:9092'
+      
+      # Advertised listeners - replace your-domain.com with your actual domain
+      KAFKA_ADVERTISED_LISTENERS: 'SASL_PLAINTEXT://wilsoniumite.com:9092,PLAINTEXT://kafka:9093'
+      
+      # Listener security protocol map
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT'
+      
+      # Controller settings
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@localhost:9094'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      
+      # Inter-broker listener
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      
+      # SASL configuration
+      KAFKA_SASL_ENABLED_MECHANISMS: 'PLAIN'
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: 'PLAIN'
+      
+      # JAAS configuration for SASL
+      KAFKA_OPTS: '-Djava.security.auth.login.config=/etc/kafka/kafka_jaas.conf'
+      
+      # Log settings
+      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+      - ./kafka_jaas.conf:/etc/kafka/kafka_jaas.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9093 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 2s  # Give it 2 seconds before starting health checks
+
+  # Bluesky Producer Service
+  bluesky-producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: bluesky-producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: 'kafka:9093'  # Use internal listener (no auth needed)
+      KAFKA_TOPIC: 'bluesky-firehose'
+      BLUESKY_WEBSOCKET_URI: 'wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post'
+      # No SASL needed for internal connection
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Kafka UI for monitoring
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8082:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: bluesky-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9093
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    depends_on:
+      - kafka
+    restart: unless-stopped
+
+volumes:
+  kafka-data:
