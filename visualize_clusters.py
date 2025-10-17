@@ -47,7 +47,7 @@ fig.update_traces(textposition="middle center", textfont_size=10)
 fig.update_layout(
     xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
     yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-    showlegend=False  # hide legend for clarity
+    showlegend=False  
 )
 
 fig.show()

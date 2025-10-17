@@ -74,7 +74,7 @@ print(f"After filtering: {len(df)} posts remain.")
 
 # ---------------- Load model ----------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = SentenceTransformer(MODEL_ID, device=device).eval()
+model = SentenceTransformer(MODEL_ID, device=device,truncate_dim=256).eval()
 try:
     model.max_seq_length = MAX_SEQ_LEN
 except Exception:
@@ -91,6 +91,7 @@ if device == "cuda":
 texts = df["text_clean"].tolist()
 embeddings = model.encode(
     texts,
+    prompt_name="Clustering",
     batch_size=BATCH_SIZE,
     show_progress_bar=True,
     normalize_embeddings=False,
